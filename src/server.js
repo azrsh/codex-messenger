@@ -177,6 +177,42 @@ async function createRealtimeSession(res, requestId) {
     return sendJson(res, 500, { error: "OPENAI_API_KEY is not set" });
   }
 
+  const startCodexRequestTool = {
+    type: "function",
+    name: "start_codex_request",
+    description:
+      "Start a substantive user request in Codex app-server. Returns quickly with a request id; use poll_codex_request to check progress.",
+    parameters: {
+      type: "object",
+      properties: {
+        message: {
+          type: "string",
+          description:
+            "The user's request to Codex. Preserve concrete details, constraints, file names, and quoted text.",
+        },
+      },
+      required: ["message"],
+      additionalProperties: false,
+    },
+  };
+  const pollCodexRequestTool = {
+    type: "function",
+    name: "poll_codex_request",
+    description:
+      "Check the current status of a Codex request that was started with start_codex_request.",
+    parameters: {
+      type: "object",
+      properties: {
+        requestId: {
+          type: "string",
+          description: "The request id returned by start_codex_request.",
+        },
+      },
+      required: ["requestId"],
+      additionalProperties: false,
+    },
+  };
+
   const session = {
     session: {
       type: "realtime",
@@ -189,8 +225,22 @@ async function createRealtimeSession(res, requestId) {
           voice: process.env.CODEX_MESSENGER_REALTIME_VOICE || "marin",
         },
       },
-      instructions:
-        "You are a voice interface for Codex Messenger. Keep responses brief. The app will send finalized user requests to Codex.",
+      tools: [startCodexRequestTool, pollCodexRequestTool],
+      tool_choice: "auto",
+      instructions: `
+You are the realtime junior agent for Codex Messenger. Codex app-server is your supervisor and owns all substantive coding work.
+
+# Core behavior
+- For greetings, thanks, short acknowledgements, or requests to repeat yourself, respond directly and briefly.
+- For any coding request, repository question, file inspection, implementation request, debugging request, planning request, or anything that should be handled by Codex, you MUST call start_codex_request.
+- Before calling start_codex_request, say a short neutral filler phrase such as "One moment." or "Let me check."
+- Do not answer substantive Codex requests yourself.
+- Do not summarize away details when calling start_codex_request. Preserve the user's concrete request, constraints, file paths, selected text, and quoted text.
+- After start_codex_request returns, briefly tell the user Codex is working, then use poll_codex_request whenever the app prompts you to check status.
+- While poll_codex_request returns "running", give concise spoken progress updates without inventing details.
+- When poll_codex_request returns "completed", relay Codex's final response naturally and concisely.
+- If Codex reports that it is already working, tell the user briefly and do not start another task.
+      `.trim(),
     },
   };
 
@@ -305,16 +355,22 @@ async function ensureCodexThread(conversationId) {
   log("info", "Ensuring Codex thread", {
     conversationId,
     existingThreadId: conversation.codexThreadId,
+    ready: Boolean(conversation.codexThreadReadyAt),
   });
-  const thread = await bridge.startOrResumeThread(conversation);
+  const prepared = await prepareCodexThread(conversation);
+  const { thread } = prepared;
   const updated = await store.update(conversationId, {
     codexThreadId: thread.id,
+    codexThreadReadyAt: prepared.bootstrapped
+      ? Date.now()
+      : conversation.codexThreadReadyAt || Date.now(),
     lastKnownTitle: conversation.lastKnownTitle,
   });
 
   log("info", "Codex thread ready", {
     conversationId,
     threadId: thread.id,
+    bootstrapped: prepared.bootstrapped,
   });
   publish(conversationId, "codex_connected", {
     conversation: updated,
@@ -323,6 +379,33 @@ async function ensureCodexThread(conversationId) {
   });
 
   return updated;
+}
+
+async function prepareCodexThread(conversation) {
+  try {
+    return await bridge.prepareThreadForDesktop(conversation, {
+      onEvent: (event) => publish(conversation.conversationId, "codex_event", event),
+    });
+  } catch (error) {
+    if (!conversation.codexThreadId || !isMissingRolloutError(error)) throw error;
+
+    log("warn", "Saved Codex thread has no rollout; creating a replacement", {
+      conversationId: conversation.conversationId,
+      threadId: conversation.codexThreadId,
+      error: error.message,
+    });
+    const reset = await store.update(conversation.conversationId, {
+      codexThreadId: null,
+      codexThreadReadyAt: null,
+    });
+    return bridge.prepareThreadForDesktop(reset, {
+      onEvent: (event) => publish(conversation.conversationId, "codex_event", event),
+    });
+  }
+}
+
+function isMissingRolloutError(error) {
+  return /no rollout found/i.test(error.message || "");
 }
 
 async function runCodexTurn(conversationId, message) {
@@ -343,6 +426,7 @@ async function runCodexTurn(conversationId, message) {
   const title = message.length > 80 ? `${message.slice(0, 77)}...` : message;
   const updated = await store.update(conversationId, {
     codexThreadId: result.threadId,
+    codexThreadReadyAt: conversation.codexThreadReadyAt || Date.now(),
     lastKnownTitle: title,
   });
 

@@ -211,6 +211,8 @@ Responsibilities:
 - Initialize app-server JSON-RPC once per process or per session.
 - `thread/start` when no `codexThreadId` exists.
 - `thread/resume` when continuing an existing conversation.
+- Complete a minimal connect-time turn before showing a Codex Desktop deeplink,
+  because a thread created without a turn may not have a Desktop rollout yet.
 - `turn/start` for new user messages.
 - Stream `item/*`, `turn/*`, `thread/status/changed`, and approval events to the
   UI.

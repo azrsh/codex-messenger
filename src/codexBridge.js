@@ -10,6 +10,8 @@ const CODEX_BINARY_CANDIDATES = [
   "/Applications/Codex.app/Contents/Resources/codex",
   "codex",
 ].filter(Boolean);
+const CONNECT_BOOTSTRAP_PROMPT =
+  "Start a Codex Messenger voice session. Reply exactly: Connected.";
 
 async function resolveCodexBin() {
   for (const candidate of CODEX_BINARY_CANDIDATES) {
@@ -221,46 +223,70 @@ export class CodexBridge extends EventEmitter {
     return result.thread;
   }
 
+  async prepareThreadForDesktop(conversation, { onEvent } = {}) {
+    const thread = await this.startOrResumeThread(conversation);
+
+    if (conversation.codexThreadReadyAt) {
+      return { thread, bootstrapped: false };
+    }
+
+    const turnResult = await this.startTurnAndWait({
+      threadId: thread.id,
+      input: CONNECT_BOOTSTRAP_PROMPT,
+      conversationId: conversation.conversationId,
+      purpose: "connect_bootstrap",
+      onEvent,
+    });
+
+    return {
+      thread,
+      bootstrapped: true,
+      turnId: turnResult.turnId,
+      finalText: turnResult.finalText,
+    };
+  }
+
   async runTurn({ conversation, message, onEvent }) {
     const eventHandler = (event) => onEvent?.(event);
     this.on("event", eventHandler);
 
-    let finalText = "";
     try {
       const thread = await this.startOrResumeThread(conversation);
-      const threadId = thread.id;
-
-      log("info", "Starting Codex turn", {
+      return await this.startTurnAndWait({
+        threadId: thread.id,
+        input: message,
         conversationId: conversation.conversationId,
-        threadId,
-        inputChars: message.length,
+        purpose: "user_message",
       });
-      const turnResult = await this.request("turn/start", {
-        threadId,
-        input: [{ type: "text", text: message }],
-      });
-      const turnId = turnResult.turn.id;
-
-      finalText = await this.waitForTurn(threadId, turnId, (event) => {
-        if (
-          event.method === "item/completed" &&
-          event.params?.item?.type === "agentMessage" &&
-          typeof event.params.item.text === "string"
-        ) {
-          finalText += event.params.item.text;
-        }
-      });
-
-      log("info", "Completed Codex turn", {
-        conversationId: conversation.conversationId,
-        threadId,
-        turnId,
-        finalChars: finalText.length,
-      });
-      return { threadId, turnId, finalText };
     } finally {
       this.off("event", eventHandler);
     }
+  }
+
+  async startTurnAndWait({ threadId, input, conversationId, purpose, onEvent }) {
+    log("info", "Starting Codex turn", {
+      conversationId,
+      threadId,
+      purpose,
+      inputChars: input.length,
+    });
+    const turnResult = await this.request("turn/start", {
+      threadId,
+      input: [{ type: "text", text: input }],
+    });
+    const turnId = turnResult.turn.id;
+
+    const finalText = await this.waitForTurn(threadId, turnId, onEvent);
+
+    log("info", "Completed Codex turn", {
+      conversationId,
+      threadId,
+      turnId,
+      purpose,
+      finalChars: finalText.length,
+    });
+
+    return { threadId, turnId, finalText };
   }
 
   waitForTurn(threadId, turnId, onEvent) {

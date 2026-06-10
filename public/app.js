@@ -8,6 +8,12 @@ const state = {
   audioElement: null,
   localStream: null,
   micEnabled: false,
+  codexRunning: false,
+  activeCodexRequestId: null,
+  codexPollTimer: null,
+  codexJobs: new Map(),
+  codexToolCallPromises: new Map(),
+  codexToolCallOutputs: new Map(),
 };
 
 const els = {
@@ -24,14 +30,14 @@ const els = {
 };
 
 startEvents();
-addMessage("system", "Ready. Send a text message, or connect voice to capture speech.");
+addMessage("system", "Ready. Connect voice, then speak or send text through the realtime agent.");
 
 els.form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = els.input.value.trim();
   if (!message) return;
   els.input.value = "";
-  await sendToCodex(message);
+  sendTextToRealtime(message);
 });
 
 els.connectRealtime.addEventListener("click", connectRealtime);
@@ -58,8 +64,7 @@ async function api(path, options = {}) {
   return body;
 }
 
-async function sendToCodex(message) {
-  addMessage("user", message);
+async function runCodexTool(message, callId) {
   els.codexStatus.textContent = "Running";
 
   try {
@@ -67,15 +72,19 @@ async function sendToCodex(message) {
       method: "POST",
       body: JSON.stringify({
         conversationId: state.conversationId,
-        idempotencyKey: crypto.randomUUID(),
+        idempotencyKey: `realtime:${callId}`,
         message,
       }),
     });
     showThreadLink(result.conversation?.codexThreadId);
-    addMessage("assistant", result.finalText || "(No final text)");
-    speakWithRealtime(result.finalText);
+    return {
+      ok: true,
+      finalText: result.finalText || "",
+      conversation: result.conversation,
+      turnId: result.turnId,
+    };
   } catch (error) {
-    addMessage("system", error.message);
+    return { ok: false, error: error.message };
   } finally {
     els.codexStatus.textContent = "Idle";
   }
@@ -98,6 +107,7 @@ function startEvents() {
     state.eventSource.addEventListener(name, (event) => {
       const payload = JSON.parse(event.data);
       updateThreadLinkFromEvent(name, payload);
+      updateCodexJobFromEvent(name, payload);
       logEvent(name, payload);
     });
   }
@@ -189,6 +199,7 @@ function disconnectRealtime() {
   state.peerConnection = null;
   state.localStream = null;
   state.micEnabled = false;
+  stopCodexPollingLoop();
   els.realtimeStatus.textContent = "Disconnected";
   els.connectRealtime.disabled = false;
   els.disconnectRealtime.disabled = true;
@@ -226,22 +237,314 @@ function handleRealtimeEvent(event) {
     const text = event.transcript?.trim();
     if (text) {
       els.input.value = text;
-      addMessage("system", `Transcribed voice. Review and press Send: ${text}`);
+      addMessage("user", text);
     }
+    return;
+  }
+
+  if (event.type === "response.audio_transcript.done" && event.transcript?.trim()) {
+    addMessage("assistant", event.transcript.trim());
+    return;
+  }
+
+  if (event.type === "response.text.done" && event.text?.trim()) {
+    addMessage("assistant", event.text.trim());
+    return;
+  }
+
+  const toolCall = getRealtimeToolCall(event);
+  if (toolCall) {
+    handleRealtimeToolCall(toolCall);
   }
 }
 
-function speakWithRealtime(text) {
-  if (!text || state.dataChannel?.readyState !== "open") return;
+function sendTextToRealtime(text) {
+  if (state.dataChannel?.readyState !== "open") {
+    addMessage("system", "Connect voice before sending. Text now routes through the realtime agent.");
+    return;
+  }
+
+  addMessage("user", text);
+  state.dataChannel.send(
+    JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text }],
+      },
+    }),
+  );
+  state.dataChannel.send(JSON.stringify({ type: "response.create" }));
+}
+
+function getRealtimeToolCall(event) {
+  if (
+    event.type === "response.output_item.done" &&
+    event.item?.type === "function_call" &&
+    isCodexToolName(event.item.name)
+  ) {
+    return {
+      callId: event.item.call_id,
+      name: event.item.name,
+      arguments: event.item.arguments || "{}",
+    };
+  }
+
+  if (
+    event.type === "response.function_call_arguments.done" &&
+    isCodexToolName(event.name)
+  ) {
+    return {
+      callId: event.call_id,
+      name: event.name,
+      arguments: event.arguments || "{}",
+    };
+  }
+
+  const outputItems = event.response?.output || [];
+  const item = outputItems.find(
+    (candidate) =>
+      candidate?.type === "function_call" &&
+      isCodexToolName(candidate?.name),
+  );
+  if (item) {
+    return {
+      callId: item.call_id,
+      name: item.name,
+      arguments: item.arguments || "{}",
+    };
+  }
+
+  return null;
+}
+
+function isCodexToolName(name) {
+  return name === "start_codex_request" || name === "poll_codex_request";
+}
+
+async function handleRealtimeToolCall(toolCall) {
+  const { callId } = toolCall;
+  if (!callId) return;
+
+  if (state.codexToolCallOutputs.has(callId)) {
+    sendCodexToolOutput(callId, state.codexToolCallOutputs.get(callId));
+    return;
+  }
+
+  if (state.codexToolCallPromises.has(callId)) return;
+
+  const promise = executeRealtimeToolCall(toolCall);
+  state.codexToolCallPromises.set(callId, promise);
+  try {
+    const output = await promise;
+    state.codexToolCallOutputs.set(callId, output);
+    sendCodexToolOutput(callId, output);
+  } finally {
+    state.codexToolCallPromises.delete(callId);
+  }
+}
+
+async function executeRealtimeToolCall(toolCall) {
+  let args;
+  try {
+    args = JSON.parse(toolCall.arguments || "{}");
+  } catch {
+    return { ok: false, error: "Codex request arguments were not valid JSON." };
+  }
+
+  if (toolCall.name === "poll_codex_request") {
+    return pollCodexJob(String(args.requestId || "").trim());
+  }
+
+  const message = String(args.message || "").trim();
+  if (!message) {
+    return { ok: false, error: "No Codex message was provided." };
+  }
+
+  if (state.codexRunning) {
+    return {
+      ok: false,
+      status: "busy",
+      activeRequestId: state.activeCodexRequestId,
+      error: "Codex is already working on a request. Please wait for it to finish before starting another.",
+    };
+  }
+
+  return startCodexJob(message, toolCall.callId);
+}
+
+function sendCodexToolOutput(callId, output) {
+  if (state.dataChannel?.readyState !== "open") return;
+
+  state.dataChannel.send(
+    JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "function_call_output",
+        call_id: callId,
+        output: JSON.stringify(output),
+      },
+    }),
+  );
   state.dataChannel.send(
     JSON.stringify({
       type: "response.create",
       response: {
         modalities: ["audio", "text"],
-        instructions: `Read this Codex response aloud exactly and briefly: ${text}`,
       },
     }),
   );
+}
+
+function startCodexJob(message, requestId) {
+  const job = {
+    requestId,
+    message,
+    status: "running",
+    progress: "Codex request started.",
+    finalText: "",
+    error: null,
+    turnId: null,
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  state.codexJobs.set(requestId, job);
+  state.activeCodexRequestId = requestId;
+  state.codexRunning = true;
+  els.codexStatus.textContent = "Running";
+  addMessage("system", `Sending to Codex: ${message}`);
+
+  runCodexTool(message, requestId).then((result) => {
+    if (result.ok) {
+      Object.assign(job, {
+        status: "completed",
+        progress: "Codex completed the request.",
+        finalText: result.finalText || "",
+        turnId: result.turnId || null,
+        conversation: result.conversation,
+        updatedAt: Date.now(),
+      });
+    } else {
+      Object.assign(job, {
+        status: "failed",
+        progress: "Codex failed the request.",
+        error: result.error || "Codex request failed.",
+        updatedAt: Date.now(),
+      });
+    }
+  }).finally(() => {
+    state.codexRunning = false;
+    state.activeCodexRequestId = null;
+    els.codexStatus.textContent = "Idle";
+    requestCodexPoll(requestId, "Codex finished. Call poll_codex_request once now and relay the final result.");
+  });
+
+  startCodexPollingLoop(requestId);
+
+  return {
+    ok: true,
+    requestId,
+    status: "running",
+    progress: job.progress,
+    instruction: "Poll this request until it is completed, failed, or interrupted.",
+  };
+}
+
+function pollCodexJob(requestId) {
+  const job = state.codexJobs.get(requestId);
+  if (!job) {
+    return { ok: false, status: "not_found", error: "Unknown Codex request id." };
+  }
+
+  const payload = {
+    ok: job.status !== "failed",
+    requestId: job.requestId,
+    status: job.status,
+    progress: job.progress,
+    elapsedSeconds: Math.max(0, Math.round((Date.now() - job.startedAt) / 1000)),
+  };
+
+  if (job.status === "completed") {
+    stopCodexPollingLoop();
+    payload.finalText = job.finalText || "(No final text)";
+    payload.turnId = job.turnId;
+  } else if (job.status === "failed") {
+    stopCodexPollingLoop();
+    payload.error = job.error || "Codex request failed.";
+  }
+
+  return payload;
+}
+
+function startCodexPollingLoop(requestId) {
+  stopCodexPollingLoop();
+  state.codexPollTimer = setInterval(() => {
+    const job = state.codexJobs.get(requestId);
+    if (!job || job.status !== "running") {
+      stopCodexPollingLoop();
+      return;
+    }
+    requestCodexPoll(requestId, "Call poll_codex_request now and give a brief progress update.");
+  }, 8000);
+}
+
+function stopCodexPollingLoop() {
+  if (!state.codexPollTimer) return;
+  clearInterval(state.codexPollTimer);
+  state.codexPollTimer = null;
+}
+
+function requestCodexPoll(requestId, instructions) {
+  if (state.dataChannel?.readyState !== "open") return;
+  state.dataChannel.send(
+    JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        instructions: `${instructions} Use requestId ${requestId}.`,
+      },
+    }),
+  );
+}
+
+function updateCodexJobFromEvent(name, payload) {
+  const requestId = state.activeCodexRequestId;
+  if (!requestId) return;
+  const job = state.codexJobs.get(requestId);
+  if (!job || job.status !== "running") return;
+
+  if (name === "codex_event") {
+    const method = payload.method || payload.type || "codex_event";
+    const item = payload.params?.item;
+    if (method === "item/completed" && item?.type === "agentMessage") {
+      job.progress = "Codex produced assistant output and is checking whether more work remains.";
+    } else if (method === "item/started" && item?.type) {
+      job.progress = `Codex started ${item.type}.`;
+    } else if (method === "turn/plan/updated" || method === "turn/diff/updated") {
+      job.progress = "Codex updated its plan or working diff.";
+    } else {
+      job.progress = `Codex event: ${method}.`;
+    }
+    job.updatedAt = Date.now();
+    return;
+  }
+
+  if (name === "final") {
+    job.status = "completed";
+    job.progress = "Codex completed the request.";
+    job.finalText = payload.finalText || "";
+    job.conversation = payload.conversation;
+    job.updatedAt = Date.now();
+    return;
+  }
+
+  if (name === "error") {
+    job.status = "failed";
+    job.progress = "Codex failed the request.";
+    job.error = payload.message || "Codex request failed.";
+    job.updatedAt = Date.now();
+  }
 }
 
 function updateThreadLinkFromEvent(name, payload) {

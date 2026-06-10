@@ -11,6 +11,9 @@ OPENAI_API_KEY=... npm run dev
 The app binds to `127.0.0.1` on a random port by default and prints the local URL.
 Codex work is sent through `codex app-server`, so created threads appear in Codex
 Desktop.
+When voice is connected, Messenger starts a Codex thread and completes a tiny
+initial turn so the displayed `codex://threads/...` link can be opened in Codex
+Desktop immediately.
 
 ## Environment
 
@@ -31,6 +34,8 @@ Desktop.
 
 - Local-only HTTP server with per-launch capability token.
 - Realtime WebRTC session creation with the API key kept local.
-- Typed or transcribed text submission to Codex.
+- Realtime `start_codex_request` and `poll_codex_request` tool calls for typed
+  or spoken Codex requests.
 - Codex app-server JSON-RPC bridge over stdio.
+- Codex thread deeplinks that are prepared for Codex Desktop on voice connect.
 - Server-Sent Events for Codex progress.

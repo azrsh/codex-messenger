@@ -17,6 +17,7 @@ test("ConversationStore persists minimal conversation metadata", async () => {
 
   await store.update("conv-1", {
     codexThreadId: "thread-1",
+    codexThreadReadyAt: 123,
     lastKnownTitle: "Hello",
   });
 
@@ -26,11 +27,13 @@ test("ConversationStore persists minimal conversation metadata", async () => {
   assert.deepEqual(reloaded.list().map((item) => ({
     conversationId: item.conversationId,
     codexThreadId: item.codexThreadId,
+    codexThreadReadyAt: item.codexThreadReadyAt,
     lastKnownTitle: item.lastKnownTitle,
   })), [
     {
       conversationId: "conv-1",
       codexThreadId: "thread-1",
+      codexThreadReadyAt: 123,
       lastKnownTitle: "Hello",
     },
   ]);
