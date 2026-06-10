@@ -1,4 +1,5 @@
-const token = window.CODEX_MESSENGER_TOKEN;
+const config = window.CODEX_MESSENGER_CONFIG || {};
+const token = config.token || window.CODEX_MESSENGER_TOKEN;
 const state = {
   conversationId: crypto.randomUUID(),
   eventSource: null,
@@ -125,8 +126,9 @@ async function connectRealtime() {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
-    const realtimeModel = "gpt-realtime";
-    const sdpResponse = await fetch(`https://api.openai.com/v1/realtime/calls?model=${realtimeModel}`, {
+    const realtimeCallsUrl = new URL(config.realtimeCallsUrl || "https://api.openai.com/v1/realtime/calls");
+    realtimeCallsUrl.searchParams.set("model", config.realtimeModel || "gpt-realtime");
+    const sdpResponse = await fetch(realtimeCallsUrl.toString(), {
       method: "POST",
       body: offer.sdp,
       headers: {

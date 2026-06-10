@@ -161,6 +161,8 @@ Responsibilities:
 
 - Hold `OPENAI_API_KEY`.
 - Create Realtime sessions.
+- Respect an optional `OPENAI_BASE_URL` for proxies or OpenAI-compatible API
+  endpoints.
 - Manage a Codex app-server subprocess or connect to a configured app-server
   endpoint.
 - Translate app-server JSON-RPC events into UI events.

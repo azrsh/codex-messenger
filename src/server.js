@@ -5,6 +5,7 @@ import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { CodexBridge } from "./codexBridge.js";
+import { getRealtimeModel, openAIEndpoint } from "./openaiConfig.js";
 import { ConversationStore } from "./store.js";
 import {
   createCapabilityToken,
@@ -21,6 +22,7 @@ const store = new ConversationStore();
 const bridge = new CodexBridge({ cwd: rootDir });
 const subscribers = new Map();
 const idempotency = new Map();
+const realtimeModel = getRealtimeModel();
 
 await store.load();
 
@@ -94,9 +96,14 @@ async function route(req, res) {
 
 async function serveIndex(res) {
   const html = await readFile(join(publicDir, "index.html"), "utf8");
+  const clientConfig = {
+    token,
+    realtimeCallsUrl: openAIEndpoint("/realtime/calls"),
+    realtimeModel,
+  };
   const rendered = html.replace(
     "</head>",
-    `<script>window.CODEX_MESSENGER_TOKEN=${JSON.stringify(token)};</script></head>`,
+    `<script>window.CODEX_MESSENGER_CONFIG=${JSON.stringify(clientConfig)};</script></head>`,
   );
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
   res.end(rendered);
@@ -121,7 +128,7 @@ async function createRealtimeSession(res) {
   const session = {
     session: {
       type: "realtime",
-      model: process.env.CODEX_MESSENGER_REALTIME_MODEL || "gpt-realtime",
+      model: realtimeModel,
       audio: {
         input: {
           transcription: { model: "gpt-4o-mini-transcribe" },
@@ -135,7 +142,7 @@ async function createRealtimeSession(res) {
     },
   };
 
-  const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+  const response = await fetch(openAIEndpoint("/realtime/client_secrets"), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,

@@ -15,6 +15,10 @@ Desktop.
 ## Environment
 
 - `OPENAI_API_KEY`: required for Realtime session creation.
+- `OPENAI_BASE_URL`: optional OpenAI API base URL. Defaults to
+  `https://api.openai.com/v1`; host-only URLs are treated as API roots and get
+  `/v1` appended.
+- `OPENAI_API_BASE_URL`: optional fallback alias for `OPENAI_BASE_URL`.
 - `CODEX_MESSENGER_PORT`: optional fixed local port.
 - `CODEX_MESSENGER_HOME`: optional local state directory. Defaults to
   `~/.codex-messenger`.
