@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex Messenger</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="sidebar">
+        <div>
+          <h1>Codex Messenger</h1>
+          <p class="muted">Local voice and text bridge to Codex.</p>
+        </div>
+        <div class="status-grid">
+          <span>Realtime</span>
+          <strong id="realtimeStatus">Disconnected</strong>
+          <span>Codex</span>
+          <strong id="codexStatus">Idle</strong>
+        </div>
+        <div class="controls">
+          <button id="connectRealtime" type="button">Connect voice</button>
+          <button id="disconnectRealtime" type="button" disabled>Disconnect</button>
+        </div>
+      </section>
+
+      <section class="conversation">
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <form id="messageForm" class="composer">
+          <textarea id="messageInput" rows="3" placeholder="Message Codex"></textarea>
+          <button type="submit">Send</button>
+        </form>
+      </section>
+
+      <section class="events">
+        <h2>Events</h2>
+        <pre id="eventLog"></pre>
+      </section>
+    </main>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>
