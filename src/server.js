@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { CodexBridge } from "./codexBridge.js";
 import { getRealtimeModel, openAIEndpoint } from "./openaiConfig.js";
 import { ConversationStore } from "./store.js";
+import { log } from "./logger.js";
 import {
   createCapabilityToken,
   validateApiRequest,
@@ -25,6 +26,9 @@ const idempotency = new Map();
 const realtimeModel = getRealtimeModel();
 
 await store.load();
+log("info", "Conversation store loaded", {
+  conversations: store.list().length,
+});
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -35,10 +39,39 @@ const mimeTypes = {
 };
 
 const server = createServer(async (req, res) => {
+  const requestId = randomUUID();
+  const startedAt = Date.now();
+  const originalWriteHead = res.writeHead.bind(res);
+  res.writeHead = (statusCode, ...args) => {
+    res.statusCode = statusCode;
+    return originalWriteHead(statusCode, ...args);
+  };
+  res.on("finish", () => {
+    log("info", "HTTP request completed", {
+      requestId,
+      method: req.method,
+      url: req.url,
+      statusCode: res.statusCode,
+      durationMs: Date.now() - startedAt,
+    });
+  });
+
   try {
-    await route(req, res);
+    log("debug", "HTTP request received", {
+      requestId,
+      method: req.method,
+      url: req.url,
+      host: req.headers.host,
+      origin: req.headers.origin,
+      fetchSite: req.headers["sec-fetch-site"],
+    });
+    await route(req, res, requestId);
   } catch (error) {
-    console.error(error);
+    log("error", "Unhandled request error", {
+      requestId,
+      error: error.message,
+      stack: error.stack,
+    });
     sendJson(res, 500, { error: error.message || "Internal Server Error" });
   }
 });
@@ -47,9 +80,15 @@ server.listen(port, host, () => {
   const address = server.address();
   const url = `http://${host}:${address.port}/`;
   console.log(`Codex Messenger running at ${url}`);
+  log("info", "Codex Messenger server listening", {
+    url,
+    pid: process.pid,
+    node: process.version,
+    cwd: rootDir,
+  });
 });
 
-async function route(req, res) {
+async function route(req, res, requestId) {
   const actualPort = server.address().port;
   const url = new URL(req.url, `http://${host}:${actualPort}`);
 
@@ -67,11 +106,19 @@ async function route(req, res) {
       port: actualPort,
       allowQueryToken: url.pathname.endsWith("/events"),
     });
-    if (!auth.ok) return sendJson(res, auth.status, { error: auth.message });
+    if (!auth.ok) {
+      log("warn", "API auth rejected", {
+        requestId,
+        path: url.pathname,
+        status: auth.status,
+        reason: auth.message,
+      });
+      return sendJson(res, auth.status, { error: auth.message });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/realtime/session") {
-    return createRealtimeSession(res);
+    return createRealtimeSession(res, requestId);
   }
 
   if (req.method === "GET" && url.pathname === "/api/conversations") {
@@ -80,15 +127,19 @@ async function route(req, res) {
 
   const eventsMatch = /^\/api\/conversations\/([^/]+)\/events$/.exec(url.pathname);
   if (req.method === "GET" && eventsMatch) {
-    return subscribe(eventsMatch[1], req, res);
+    return subscribe(eventsMatch[1], req, res, requestId);
   }
 
   if (req.method === "POST" && url.pathname === "/api/codex/message") {
-    return handleCodexMessage(req, res);
+    return handleCodexMessage(req, res, requestId);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/codex/connect") {
+    return handleCodexConnect(req, res, requestId);
   }
 
   if (req.method === "POST" && url.pathname === "/api/codex/interrupt") {
-    return handleInterrupt(req, res);
+    return handleInterrupt(req, res, requestId);
   }
 
   sendJson(res, 404, { error: "Not found" });
@@ -120,8 +171,9 @@ function serveStatic(pathname, res) {
   stream.pipe(res);
 }
 
-async function createRealtimeSession(res) {
+async function createRealtimeSession(res, requestId) {
   if (!process.env.OPENAI_API_KEY) {
+    log("warn", "Realtime session requested without OPENAI_API_KEY", { requestId });
     return sendJson(res, 500, { error: "OPENAI_API_KEY is not set" });
   }
 
@@ -142,6 +194,11 @@ async function createRealtimeSession(res) {
     },
   };
 
+  log("info", "Creating Realtime client secret", {
+    requestId,
+    model: session.session.model,
+    voice: session.session.audio.output.voice,
+  });
   const response = await fetch(openAIEndpoint("/realtime/client_secrets"), {
     method: "POST",
     headers: {
@@ -152,26 +209,49 @@ async function createRealtimeSession(res) {
   });
 
   const text = await response.text();
+  log(response.ok ? "info" : "warn", "Realtime client secret response", {
+    requestId,
+    status: response.status,
+    ok: response.ok,
+    responseChars: text.length,
+  });
   res.writeHead(response.status, {
     "Content-Type": response.headers.get("content-type") || "application/json",
   });
   res.end(text);
 }
 
-async function handleCodexMessage(req, res) {
+async function handleCodexMessage(req, res, requestId) {
   const body = await readJson(req);
   const conversationId = body.conversationId || randomUUID();
   const idempotencyKey = body.idempotencyKey;
   const message = String(body.message || "").trim();
 
-  if (!idempotencyKey) return sendJson(res, 400, { error: "idempotencyKey is required" });
-  if (!message) return sendJson(res, 400, { error: "message is required" });
+  if (!idempotencyKey) {
+    log("warn", "Codex message missing idempotency key", { requestId, conversationId });
+    return sendJson(res, 400, { error: "idempotencyKey is required" });
+  }
+  if (!message) {
+    log("warn", "Codex message missing body", { requestId, conversationId });
+    return sendJson(res, 400, { error: "message is required" });
+  }
 
   const dedupeKey = `${conversationId}:${idempotencyKey}`;
   if (idempotency.has(dedupeKey)) {
+    log("info", "Codex message idempotency hit", {
+      requestId,
+      conversationId,
+      idempotencyKey,
+    });
     return sendJson(res, 202, await idempotency.get(dedupeKey));
   }
 
+  log("info", "Codex message accepted", {
+    requestId,
+    conversationId,
+    idempotencyKey,
+    inputChars: message.length,
+  });
   const promise = runCodexTurn(conversationId, message);
   idempotency.set(dedupeKey, promise);
 
@@ -181,13 +261,77 @@ async function handleCodexMessage(req, res) {
     sendJson(res, 200, result);
   } catch (error) {
     idempotency.delete(dedupeKey);
+    log("error", "Codex message failed", {
+      requestId,
+      conversationId,
+      error: error.message,
+      stack: error.stack,
+    });
     publish(conversationId, "error", { message: error.message });
     sendJson(res, 500, { error: error.message });
   }
 }
 
+async function handleCodexConnect(req, res, requestId) {
+  const body = await readJson(req);
+  const conversationId = body.conversationId || randomUUID();
+
+  try {
+    log("info", "Codex connect requested", {
+      requestId,
+      conversationId,
+    });
+    const conversation = await ensureCodexThread(conversationId);
+    log("info", "Codex connect completed", {
+      requestId,
+      conversationId,
+      threadId: conversation.codexThreadId,
+    });
+    sendJson(res, 200, { conversation });
+  } catch (error) {
+    log("error", "Codex connect failed", {
+      requestId,
+      conversationId,
+      error: error.message,
+      stack: error.stack,
+    });
+    publish(conversationId, "error", { message: error.message });
+    sendJson(res, 500, { error: error.message });
+  }
+}
+
+async function ensureCodexThread(conversationId) {
+  const conversation = await store.ensure(conversationId);
+  log("info", "Ensuring Codex thread", {
+    conversationId,
+    existingThreadId: conversation.codexThreadId,
+  });
+  const thread = await bridge.startOrResumeThread(conversation);
+  const updated = await store.update(conversationId, {
+    codexThreadId: thread.id,
+    lastKnownTitle: conversation.lastKnownTitle,
+  });
+
+  log("info", "Codex thread ready", {
+    conversationId,
+    threadId: thread.id,
+  });
+  publish(conversationId, "codex_connected", {
+    conversation: updated,
+    thread,
+    deeplink: `codex://threads/${thread.id}`,
+  });
+
+  return updated;
+}
+
 async function runCodexTurn(conversationId, message) {
   const conversation = await store.ensure(conversationId);
+  log("info", "Running Codex turn", {
+    conversationId,
+    existingThreadId: conversation.codexThreadId,
+    inputChars: message.length,
+  });
   publish(conversationId, "user_message", { message });
 
   const result = await bridge.runTurn({
@@ -202,6 +346,12 @@ async function runCodexTurn(conversationId, message) {
     lastKnownTitle: title,
   });
 
+  log("info", "Codex turn stored", {
+    conversationId,
+    threadId: result.threadId,
+    turnId: result.turnId,
+    finalChars: result.finalText.length,
+  });
   publish(conversationId, "final", {
     finalText: result.finalText,
     conversation: updated,
@@ -214,19 +364,28 @@ async function runCodexTurn(conversationId, message) {
   };
 }
 
-async function handleInterrupt(req, res) {
+async function handleInterrupt(req, res, requestId) {
   const body = await readJson(req);
   const conversation = store.get(body.conversationId);
   if (!conversation?.codexThreadId) {
+    log("warn", "Interrupt requested without Codex thread", {
+      requestId,
+      conversationId: body.conversationId,
+    });
     return sendJson(res, 404, { error: "Conversation has no Codex thread" });
   }
 
+  log("info", "Interrupting Codex turn", {
+    requestId,
+    conversationId: conversation.conversationId,
+    threadId: conversation.codexThreadId,
+  });
   await bridge.interrupt(conversation.codexThreadId);
   publish(conversation.conversationId, "interrupt", {});
   sendJson(res, 200, { ok: true });
 }
 
-function subscribe(conversationId, req, res) {
+function subscribe(conversationId, req, res, requestId) {
   res.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -237,15 +396,30 @@ function subscribe(conversationId, req, res) {
   const set = subscribers.get(conversationId) || new Set();
   set.add(res);
   subscribers.set(conversationId, set);
+  log("info", "SSE subscriber connected", {
+    requestId,
+    conversationId,
+    subscribers: set.size,
+  });
 
   req.on("close", () => {
     set.delete(res);
     if (set.size === 0) subscribers.delete(conversationId);
+    log("info", "SSE subscriber disconnected", {
+      requestId,
+      conversationId,
+      subscribers: set.size,
+    });
   });
 }
 
 function publish(conversationId, event, data) {
   const set = subscribers.get(conversationId);
+  log("debug", "Publishing SSE event", {
+    conversationId,
+    event,
+    subscribers: set?.size || 0,
+  });
   if (!set) return;
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const res of set) res.write(payload);

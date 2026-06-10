@@ -17,6 +17,8 @@ const els = {
   eventLog: document.querySelector("#eventLog"),
   realtimeStatus: document.querySelector("#realtimeStatus"),
   codexStatus: document.querySelector("#codexStatus"),
+  threadLinkPanel: document.querySelector("#threadLinkPanel"),
+  threadLink: document.querySelector("#threadLink"),
   connectRealtime: document.querySelector("#connectRealtime"),
   disconnectRealtime: document.querySelector("#disconnectRealtime"),
 };
@@ -69,6 +71,7 @@ async function sendToCodex(message) {
         message,
       }),
     });
+    showThreadLink(result.conversation?.codexThreadId);
     addMessage("assistant", result.finalText || "(No final text)");
     speakWithRealtime(result.finalText);
   } catch (error) {
@@ -84,9 +87,18 @@ function startEvents() {
     `/api/conversations/${state.conversationId}/events?token=${encodeURIComponent(token)}`,
   );
 
-  for (const name of ["user_message", "codex_event", "final", "error", "interrupt"]) {
+  for (const name of [
+    "user_message",
+    "codex_connected",
+    "codex_event",
+    "final",
+    "error",
+    "interrupt",
+  ]) {
     state.eventSource.addEventListener(name, (event) => {
-      logEvent(name, JSON.parse(event.data));
+      const payload = JSON.parse(event.data);
+      updateThreadLinkFromEvent(name, payload);
+      logEvent(name, payload);
     });
   }
 }
@@ -94,6 +106,20 @@ function startEvents() {
 async function connectRealtime() {
   els.realtimeStatus.textContent = "Connecting";
   try {
+    const stream = await requestMicrophone();
+    state.localStream = stream;
+    state.micEnabled = true;
+
+    els.codexStatus.textContent = "Connecting";
+    const codexConnection = await api("/api/codex/connect", {
+      method: "POST",
+      body: JSON.stringify({
+        conversationId: state.conversationId,
+      }),
+    });
+    showThreadLink(codexConnection.conversation?.codexThreadId);
+    els.codexStatus.textContent = "Idle";
+
     const session = await api("/api/realtime/session");
     const ephemeralKey =
       session?.value ||
@@ -113,9 +139,6 @@ async function connectRealtime() {
       state.audioElement.srcObject = event.streams[0];
     };
 
-    const stream = await requestMicrophone();
-    state.localStream = stream;
-    state.micEnabled = true;
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
 
     const dc = pc.createDataChannel("oai-events");
@@ -151,7 +174,9 @@ async function connectRealtime() {
     els.disconnectRealtime.disabled = false;
   } catch (error) {
     els.realtimeStatus.textContent = "Disconnected";
-    addMessage("system", `Realtime connection failed: ${error.message}`);
+    els.codexStatus.textContent = "Idle";
+    disconnectRealtime();
+    addMessage("system", `Voice connection failed: ${error.message}`);
   }
 }
 
@@ -217,6 +242,34 @@ function speakWithRealtime(text) {
       },
     }),
   );
+}
+
+function updateThreadLinkFromEvent(name, payload) {
+  if (name === "codex_connected") {
+    showThreadLink(payload.conversation?.codexThreadId || payload.thread?.id);
+    return;
+  }
+
+  if (name === "final") {
+    showThreadLink(payload.conversation?.codexThreadId);
+    return;
+  }
+
+  if (name !== "codex_event") return;
+
+  const threadId =
+    payload.params?.thread?.id ||
+    payload.params?.threadId ||
+    payload.result?.thread?.id;
+  showThreadLink(threadId);
+}
+
+function showThreadLink(threadId) {
+  if (!threadId) return;
+  const href = `codex://threads/${threadId}`;
+  els.threadLink.href = href;
+  els.threadLink.textContent = href;
+  els.threadLinkPanel.hidden = false;
 }
 
 function addMessage(role, text) {

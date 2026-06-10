@@ -66,6 +66,31 @@ h2 {
   font-size: 14px;
 }
 
+.thread-link-panel {
+  display: grid;
+  gap: 6px;
+  margin: -10px 0 24px;
+  font-size: 13px;
+}
+
+.thread-link-panel[hidden] {
+  display: none;
+}
+
+.thread-link-panel span {
+  color: #66737c;
+}
+
+.thread-link-panel a {
+  overflow-wrap: anywhere;
+  color: #0a5ea8;
+  text-decoration: none;
+}
+
+.thread-link-panel a:hover {
+  text-decoration: underline;
+}
+
 .controls {
   display: grid;
   gap: 10px;
