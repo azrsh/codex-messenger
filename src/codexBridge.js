@@ -257,6 +257,7 @@ export class CodexBridge extends EventEmitter {
         input: message,
         conversationId: conversation.conversationId,
         purpose: "user_message",
+        onEvent,
       });
     } finally {
       this.off("event", eventHandler);
@@ -275,6 +276,13 @@ export class CodexBridge extends EventEmitter {
       input: [{ type: "text", text: input }],
     });
     const turnId = turnResult.turn.id;
+    onEvent?.({
+      method: "turn/started",
+      params: {
+        threadId,
+        turn: turnResult.turn,
+      },
+    });
 
     const finalText = await this.waitForTurn(threadId, turnId, onEvent);
 
@@ -287,6 +295,15 @@ export class CodexBridge extends EventEmitter {
     });
 
     return { threadId, turnId, finalText };
+  }
+
+  async readThread(threadId, { includeTurns = true } = {}) {
+    await this.ensureStarted();
+    const result = await this.request("thread/read", {
+      threadId,
+      includeTurns,
+    });
+    return result.thread;
   }
 
   waitForTurn(threadId, turnId, onEvent) {

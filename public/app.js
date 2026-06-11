@@ -10,7 +10,6 @@ const state = {
   micEnabled: false,
   codexRunning: false,
   activeCodexRequestId: null,
-  codexPollTimer: null,
   codexJobs: new Map(),
   codexToolCallPromises: new Map(),
   codexToolCallOutputs: new Map(),
@@ -81,6 +80,7 @@ async function runCodexTool(message, callId) {
       ok: true,
       finalText: result.finalText || "",
       conversation: result.conversation,
+      threadId: result.conversation?.codexThreadId,
       turnId: result.turnId,
     };
   } catch (error) {
@@ -199,7 +199,6 @@ function disconnectRealtime() {
   state.peerConnection = null;
   state.localStream = null;
   state.micEnabled = false;
-  stopCodexPollingLoop();
   els.realtimeStatus.textContent = "Disconnected";
   els.connectRealtime.disabled = false;
   els.disconnectRealtime.disabled = true;
@@ -354,7 +353,7 @@ async function executeRealtimeToolCall(toolCall) {
   }
 
   if (toolCall.name === "poll_codex_request") {
-    return pollCodexJob(String(args.requestId || "").trim());
+    return await pollCodexJob(String(args.requestId || "").trim());
   }
 
   const message = String(args.message || "").trim();
@@ -403,6 +402,7 @@ function startCodexJob(message, requestId) {
     message,
     status: "running",
     progress: "Codex request started.",
+    progressDetails: [],
     finalText: "",
     error: null,
     turnId: null,
@@ -421,6 +421,7 @@ function startCodexJob(message, requestId) {
         status: "completed",
         progress: "Codex completed the request.",
         finalText: result.finalText || "",
+        threadId: result.threadId || result.conversation?.codexThreadId || null,
         turnId: result.turnId || null,
         conversation: result.conversation,
         updatedAt: Date.now(),
@@ -437,10 +438,8 @@ function startCodexJob(message, requestId) {
     state.codexRunning = false;
     state.activeCodexRequestId = null;
     els.codexStatus.textContent = "Idle";
-    requestCodexPoll(requestId, "Codex finished. Call poll_codex_request once now and relay the final result.");
+    notifyCodexStatusChanged(requestId, "completed");
   });
-
-  startCodexPollingLoop(requestId);
 
   return {
     ok: true,
@@ -451,58 +450,85 @@ function startCodexJob(message, requestId) {
   };
 }
 
-function pollCodexJob(requestId) {
+async function pollCodexJob(requestId) {
   const job = state.codexJobs.get(requestId);
   if (!job) {
     return { ok: false, status: "not_found", error: "Unknown Codex request id." };
   }
+
+  await refreshCodexJobFromThread(job);
 
   const payload = {
     ok: job.status !== "failed",
     requestId: job.requestId,
     status: job.status,
     progress: job.progress,
+    progressDetails: job.progressDetails || [],
     elapsedSeconds: Math.max(0, Math.round((Date.now() - job.startedAt) / 1000)),
   };
 
   if (job.status === "completed") {
-    stopCodexPollingLoop();
     payload.finalText = job.finalText || "(No final text)";
     payload.turnId = job.turnId;
   } else if (job.status === "failed") {
-    stopCodexPollingLoop();
     payload.error = job.error || "Codex request failed.";
   }
 
   return payload;
 }
 
-function startCodexPollingLoop(requestId) {
-  stopCodexPollingLoop();
-  state.codexPollTimer = setInterval(() => {
-    const job = state.codexJobs.get(requestId);
-    if (!job || job.status !== "running") {
-      stopCodexPollingLoop();
-      return;
+async function refreshCodexJobFromThread(job) {
+  if (!job.turnId) return;
+  try {
+    const status = await api("/api/codex/status", {
+      method: "POST",
+      body: JSON.stringify({
+        conversationId: state.conversationId,
+        turnId: job.turnId,
+      }),
+    });
+
+    if (status.threadId) job.threadId = status.threadId;
+    if (status.turnId) job.turnId = status.turnId;
+    if (status.progress) job.progress = status.progress;
+    if (Array.isArray(status.progressDetails)) job.progressDetails = status.progressDetails;
+    if (status.finalText) job.finalText = status.finalText;
+    if (status.error) job.error = status.error;
+    if (["completed", "failed", "interrupted", "running"].includes(status.status)) {
+      job.status = status.status;
     }
-    requestCodexPoll(requestId, "Call poll_codex_request now and give a brief progress update.");
-  }, 8000);
+    job.updatedAt = Date.now();
+  } catch (error) {
+    job.progress = `Codex status polling is temporarily unavailable: ${error.message}`;
+    job.updatedAt = Date.now();
+  }
 }
 
-function stopCodexPollingLoop() {
-  if (!state.codexPollTimer) return;
-  clearInterval(state.codexPollTimer);
-  state.codexPollTimer = null;
-}
-
-function requestCodexPoll(requestId, instructions) {
+function notifyCodexStatusChanged(requestId, status) {
   if (state.dataChannel?.readyState !== "open") return;
+  const detail = "Codex finished. Call poll_codex_request now and relay the final result.";
+
+  state.dataChannel.send(
+    JSON.stringify({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: `Codex status update: request ${requestId} is ${status}. ${detail}`,
+          },
+        ],
+      },
+    }),
+  );
+
   state.dataChannel.send(
     JSON.stringify({
       type: "response.create",
       response: {
         modalities: ["audio", "text"],
-        instructions: `${instructions} Use requestId ${requestId}.`,
       },
     }),
   );
@@ -517,8 +543,15 @@ function updateCodexJobFromEvent(name, payload) {
   if (name === "codex_event") {
     const method = payload.method || payload.type || "codex_event";
     const item = payload.params?.item;
+    const threadId = payload.params?.threadId || payload.params?.thread?.id;
+    const turnId = payload.params?.turnId || payload.params?.turn?.id;
+    if (threadId) job.threadId = threadId;
+    if (turnId) job.turnId = turnId;
+
     if (method === "item/completed" && item?.type === "agentMessage") {
       job.progress = "Codex produced assistant output and is checking whether more work remains.";
+    } else if (method === "turn/started") {
+      job.progress = "Codex turn has started.";
     } else if (method === "item/started" && item?.type) {
       job.progress = `Codex started ${item.type}.`;
     } else if (method === "turn/plan/updated" || method === "turn/diff/updated") {
@@ -535,6 +568,7 @@ function updateCodexJobFromEvent(name, payload) {
     job.progress = "Codex completed the request.";
     job.finalText = payload.finalText || "";
     job.conversation = payload.conversation;
+    job.threadId = payload.conversation?.codexThreadId || job.threadId;
     job.updatedAt = Date.now();
     return;
   }

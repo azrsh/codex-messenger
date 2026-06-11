@@ -138,6 +138,10 @@ async function route(req, res, requestId) {
     return handleCodexConnect(req, res, requestId);
   }
 
+  if (req.method === "POST" && url.pathname === "/api/codex/status") {
+    return handleCodexStatus(req, res, requestId);
+  }
+
   if (req.method === "POST" && url.pathname === "/api/codex/interrupt") {
     return handleInterrupt(req, res, requestId);
   }
@@ -236,10 +240,15 @@ You are the realtime junior agent for Codex Messenger. Codex app-server is your 
 - Before calling start_codex_request, say a short neutral filler phrase such as "One moment." or "Let me check."
 - Do not answer substantive Codex requests yourself.
 - Do not summarize away details when calling start_codex_request. Preserve the user's concrete request, constraints, file paths, selected text, and quoted text.
-- After start_codex_request returns, briefly tell the user Codex is working, then use poll_codex_request whenever the app prompts you to check status.
-- While poll_codex_request returns "running", give concise spoken progress updates without inventing details.
+- After start_codex_request returns, briefly tell the user Codex is working.
+- If the user asks for progress while Codex is working, call poll_codex_request and give a concise update using the returned progress and progressDetails without inventing details.
 - When poll_codex_request returns "completed", relay Codex's final response naturally and concisely.
 - If Codex reports that it is already working, tell the user briefly and do not start another task.
+
+# App status updates
+- Messages beginning with "Codex status update:" are internal app notifications, not user requests.
+- When you receive a Codex status update, do not call start_codex_request.
+- Instead, call poll_codex_request with the requestId mentioned in the status update, then respond based on that tool result.
       `.trim(),
     },
   };
@@ -446,6 +455,181 @@ async function runCodexTurn(conversationId, message) {
     finalText: result.finalText,
     turnId: result.turnId,
   };
+}
+
+async function handleCodexStatus(req, res, requestId) {
+  const body = await readJson(req);
+  const conversation = store.get(body.conversationId);
+  const turnId = String(body.turnId || "").trim();
+
+  if (!conversation?.codexThreadId) {
+    log("warn", "Codex status requested without thread", {
+      requestId,
+      conversationId: body.conversationId,
+    });
+    return sendJson(res, 404, { error: "Conversation has no Codex thread" });
+  }
+
+  log("debug", "Reading Codex thread status", {
+    requestId,
+    conversationId: conversation.conversationId,
+    threadId: conversation.codexThreadId,
+    turnId,
+  });
+
+  const thread = await bridge.readThread(conversation.codexThreadId, {
+    includeTurns: true,
+  });
+  const status = summarizeThreadStatus(thread, turnId);
+  sendJson(res, 200, {
+    conversation,
+    threadId: thread.id,
+    threadStatus: thread.status,
+    ...status,
+  });
+}
+
+function summarizeThreadStatus(thread, turnId) {
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  const turn = turnId
+    ? turns.find((candidate) => candidate.id === turnId)
+    : turns.at(-1);
+
+  if (!turn) {
+    return {
+      status: statusFromThread(thread.status),
+      progress: "Codex thread is available, but the requested turn is not loaded yet.",
+    };
+  }
+
+  const finalText = extractFinalText(turn);
+  const progress = summarizeTurnProgress(turn, finalText);
+  const progressDetails = summarizeProgressDetails(turn);
+  return {
+    turnId: turn.id,
+    status: statusFromTurn(turn.status),
+    progress,
+    progressDetails,
+    finalText,
+    error: turn.error?.message,
+  };
+}
+
+function statusFromTurn(status) {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "interrupted":
+      return "interrupted";
+    default:
+      return "running";
+  }
+}
+
+function statusFromThread(status) {
+  return status?.type === "active" ? "running" : "unknown";
+}
+
+function extractFinalText(turn) {
+  return (turn.items || [])
+    .filter((item) =>
+      item.type === "agentMessage" &&
+      typeof item.text === "string" &&
+      (!item.phase || item.phase === "final_answer")
+    )
+    .map((item) => item.text)
+    .join("")
+    .trim();
+}
+
+function summarizeTurnProgress(turn, finalText) {
+  if (turn.status === "completed") {
+    return finalText
+      ? "Codex completed the request and produced a final answer."
+      : "Codex completed the request.";
+  }
+  if (turn.status === "failed") {
+    return "Codex failed the request.";
+  }
+  if (turn.status === "interrupted") {
+    return "Codex was interrupted.";
+  }
+
+  const lastItem = [...(turn.items || [])].reverse().find((item) => item.type);
+  if (!lastItem) return "Codex is still working.";
+  if (lastItem.type === "agentMessage") {
+    return "Codex has produced assistant output and may still be working.";
+  }
+  return `Codex is working on ${lastItem.type}.`;
+}
+
+function summarizeProgressDetails(turn) {
+  return (turn.items || [])
+    .map(summarizeThreadItem)
+    .filter(Boolean)
+    .slice(-8);
+}
+
+function summarizeThreadItem(item) {
+  switch (item.type) {
+    case "agentMessage":
+      return {
+        type: "agentMessage",
+        phase: item.phase || null,
+        text: truncate(item.text, 240),
+      };
+    case "plan":
+      return {
+        type: "plan",
+        text: truncate(item.text, 240),
+      };
+    case "reasoning":
+      return {
+        type: "reasoning",
+        text: truncate([...(item.summary || []), ...(item.content || [])].join(" "), 240),
+      };
+    case "commandExecution":
+      return {
+        type: "commandExecution",
+        status: item.status,
+        command: truncate(item.command, 180),
+        exitCode: item.exitCode ?? null,
+        output: truncate(item.aggregatedOutput || "", 240),
+      };
+    case "fileChange":
+      return {
+        type: "fileChange",
+        status: item.status,
+        changes: (item.changes || []).slice(0, 5).map((change) => ({
+          kind: change.type || change.kind || "change",
+          path: change.path || change.moveTo || change.sourcePath || null,
+        })),
+      };
+    case "dynamicToolCall":
+      return {
+        type: "dynamicToolCall",
+        status: item.status,
+        tool: item.namespace ? `${item.namespace}.${item.tool}` : item.tool,
+        success: item.success,
+      };
+    case "collabAgentToolCall":
+      return {
+        type: "collabAgentToolCall",
+        status: item.status,
+        tool: item.tool,
+        receivers: item.receiverThreadIds || [],
+      };
+    default:
+      return item.type ? { type: item.type } : null;
+  }
+}
+
+function truncate(value, maxLength) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 3)}...`;
 }
 
 async function handleInterrupt(req, res, requestId) {
