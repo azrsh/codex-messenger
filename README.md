@@ -51,13 +51,18 @@ Run both commands in a port-enabled environment for the full suite.
 - Realtime WebRTC session creation with the API key kept local.
 - Realtime `start_codex_request` and `poll_codex_request` tool calls for typed
   or spoken Codex requests.
-- `steer_codex_request` for explicit corrections to a running request, using
+- `steer_codex_request` for corrections and contextual follow-ups to a running request, using
   app-server `turn/steer` with an expected turn ID. Polling and completion keep
   the original request ID. Starting, completed, or rejected turns report that
   the instruction was not confirmed; they do not start replacement work.
 - Codex app-server JSON-RPC bridge over stdio.
 - Codex thread deeplinks that are prepared for Codex Desktop on voice connect.
 - Server-Sent Events for Codex progress.
+
+Realtime is instructed to delegate substantive questions and implicit follow-ups
+without requiring the user to mention Codex, while preserving questions as
+questions rather than authorization to edit. Dispatch still depends on the
+model calling a tool; transcripts are not automatically submitted.
 
 Codex completion notifications are temporary internal messages in the Realtime
 conversation. After a matching poll returns a terminal result, the app sends a
