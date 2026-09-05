@@ -247,21 +247,14 @@ export class CodexBridge extends EventEmitter {
   }
 
   async runTurn({ conversation, message, onEvent }) {
-    const eventHandler = (event) => onEvent?.(event);
-    this.on("event", eventHandler);
-
-    try {
-      const thread = await this.startOrResumeThread(conversation);
-      return await this.startTurnAndWait({
-        threadId: thread.id,
-        input: message,
-        conversationId: conversation.conversationId,
-        purpose: "user_message",
-        onEvent,
-      });
-    } finally {
-      this.off("event", eventHandler);
-    }
+    const thread = await this.startOrResumeThread(conversation);
+    return this.startTurnAndWait({
+      threadId: thread.id,
+      input: message,
+      conversationId: conversation.conversationId,
+      purpose: "user_message",
+      onEvent,
+    });
   }
 
   async startTurnAndWait({ threadId, input, conversationId, purpose, onEvent }) {
@@ -320,6 +313,10 @@ export class CodexBridge extends EventEmitter {
       };
 
       const handler = (event) => {
+        const eventThreadId = event.params?.threadId || event.params?.thread?.id;
+        const eventTurnId = event.params?.turnId || event.params?.turn?.id;
+        if (eventThreadId !== threadId || (eventTurnId && eventTurnId !== turnId)) return;
+
         onEvent?.(event);
         if (
           event.method === "item/completed" &&
@@ -337,7 +334,12 @@ export class CodexBridge extends EventEmitter {
           event.params?.turn?.id === turnId
         ) {
           cleanup();
-          resolve(finalText.trim());
+          const turn = event.params.turn;
+          if (turn.status === "completed") {
+            resolve(finalText.trim());
+          } else {
+            reject(new Error(turn.error?.message || `Codex turn ${turn.status || "ended without a completion status"}`));
+          }
         }
       };
 

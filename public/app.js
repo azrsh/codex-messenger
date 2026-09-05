@@ -241,12 +241,12 @@ function handleRealtimeEvent(event) {
     return;
   }
 
-  if (event.type === "response.audio_transcript.done" && event.transcript?.trim()) {
+  if (event.type === "response.output_audio_transcript.done" && event.transcript?.trim()) {
     addMessage("assistant", event.transcript.trim());
     return;
   }
 
-  if (event.type === "response.text.done" && event.text?.trim()) {
+  if (event.type === "response.output_text.done" && event.text?.trim()) {
     addMessage("assistant", event.text.trim());
     return;
   }
@@ -327,7 +327,6 @@ async function handleRealtimeToolCall(toolCall) {
   if (!callId) return;
 
   if (state.codexToolCallOutputs.has(callId)) {
-    sendCodexToolOutput(callId, state.codexToolCallOutputs.get(callId));
     return;
   }
 
@@ -390,7 +389,7 @@ function sendCodexToolOutput(callId, output) {
     JSON.stringify({
       type: "response.create",
       response: {
-        modalities: ["audio", "text"],
+        output_modalities: ["audio"],
       },
     }),
   );
@@ -438,7 +437,7 @@ function startCodexJob(message, requestId) {
     state.codexRunning = false;
     state.activeCodexRequestId = null;
     els.codexStatus.textContent = "Idle";
-    notifyCodexStatusChanged(requestId, "completed");
+    notifyCodexStatusChanged(requestId, job.status);
   });
 
   return {
@@ -528,7 +527,7 @@ function notifyCodexStatusChanged(requestId, status) {
     JSON.stringify({
       type: "response.create",
       response: {
-        modalities: ["audio", "text"],
+        output_modalities: ["audio"],
       },
     }),
   );
