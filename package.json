@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node src/server.js",
+    "dev": "CODEX_MESSENGER_PORT=${CODEX_MESSENGER_PORT:-3000} node --watch src/server.js",
     "start": "node src/server.js",
     "test": "node --test test/*.test.js",
     "test:integration": "node --test test/integration/*.test.js"
