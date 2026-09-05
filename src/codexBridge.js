@@ -223,8 +223,9 @@ export class CodexBridge extends EventEmitter {
     return result.thread;
   }
 
-  async prepareThreadForDesktop(conversation, { onEvent } = {}) {
+  async prepareThreadForDesktop(conversation, { onEvent, onThreadReady } = {}) {
     const thread = await this.startOrResumeThread(conversation);
+    await onThreadReady?.(thread);
 
     if (conversation.codexThreadReadyAt) {
       return { thread, bootstrapped: false };

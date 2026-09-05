@@ -25,6 +25,7 @@ const bridge = new CodexBridge({ cwd: rootDir });
 const subscribers = new Map();
 const idempotency = new Map();
 const codexRequests = new Map();
+const codexConnections = new Map();
 const realtimeModel = getRealtimeModel();
 
 await store.load();
@@ -414,6 +415,17 @@ async function handleCodexConnect(req, res, requestId) {
 }
 
 async function ensureCodexThread(conversationId) {
+  if (codexConnections.has(conversationId)) return codexConnections.get(conversationId);
+  const pending = prepareCodexConnection(conversationId);
+  codexConnections.set(conversationId, pending);
+  try {
+    return await pending;
+  } finally {
+    codexConnections.delete(conversationId);
+  }
+}
+
+async function prepareCodexConnection(conversationId) {
   const conversation = await store.ensure(conversationId);
   log("info", "Ensuring Codex thread", {
     conversationId,
@@ -445,8 +457,10 @@ async function ensureCodexThread(conversationId) {
 }
 
 async function prepareCodexThread(conversation) {
+  const onThreadReady = (thread) => store.update(conversation.conversationId, { codexThreadId: thread.id });
   try {
     return await bridge.prepareThreadForDesktop(conversation, {
+      onThreadReady,
       onEvent: (event) => publish(conversation.conversationId, "codex_event", event),
     });
   } catch (error) {
@@ -462,6 +476,7 @@ async function prepareCodexThread(conversation) {
       codexThreadReadyAt: null,
     });
     return bridge.prepareThreadForDesktop(reset, {
+      onThreadReady,
       onEvent: (event) => publish(conversation.conversationId, "codex_event", event),
     });
   }

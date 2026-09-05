@@ -4,6 +4,7 @@ const state = {
   conversationId: crypto.randomUUID(),
   eventSource: null,
   peerConnection: null,
+  realtimeConnection: null,
   dataChannel: null,
   audioElement: null,
   localStream: null,
@@ -126,9 +127,19 @@ function startEvents() {
 }
 
 async function connectRealtime() {
+  if (state.realtimeConnection || state.peerConnection) return;
+  const connection = {};
+  state.realtimeConnection = connection;
+  const isCurrent = () => state.realtimeConnection === connection;
   els.realtimeStatus.textContent = "Connecting";
+  els.connectRealtime.disabled = true;
+  els.disconnectRealtime.disabled = false;
   try {
     const stream = await requestMicrophone();
+    if (!isCurrent()) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
     state.localStream = stream;
     state.micEnabled = true;
 
@@ -139,10 +150,12 @@ async function connectRealtime() {
         conversationId: state.conversationId,
       }),
     });
+    if (!isCurrent()) return;
     showThreadLink(codexConnection.conversation?.codexThreadId);
     els.codexStatus.textContent = "Idle";
 
     const session = await api("/api/realtime/session");
+    if (!isCurrent()) return;
     const ephemeralKey =
       session?.value ||
       session?.client_secret?.value ||
@@ -155,10 +168,11 @@ async function connectRealtime() {
     const pc = new RTCPeerConnection();
     state.peerConnection = pc;
 
-    state.audioElement = document.createElement("audio");
-    state.audioElement.autoplay = true;
+    const audio = document.createElement("audio");
+    state.audioElement = audio;
+    audio.autoplay = true;
     pc.ontrack = (event) => {
-      state.audioElement.srcObject = event.streams[0];
+      if (isCurrent()) audio.srcObject = event.streams[0];
     };
 
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
@@ -176,7 +190,9 @@ async function connectRealtime() {
     };
 
     const offer = await pc.createOffer();
+    if (!isCurrent()) return;
     await pc.setLocalDescription(offer);
+    if (!isCurrent()) return;
 
     const realtimeCallsUrl = new URL(config.realtimeCallsUrl || "https://api.openai.com/v1/realtime/calls");
     realtimeCallsUrl.searchParams.set("model", config.realtimeModel || "gpt-realtime");
@@ -188,20 +204,25 @@ async function connectRealtime() {
         "Content-Type": "application/sdp",
       },
     });
+    if (!isCurrent()) return;
 
     if (!sdpResponse.ok) {
       throw new Error(await sdpResponse.text());
     }
 
+    const sdp = await sdpResponse.text();
+    if (!isCurrent()) return;
     await pc.setRemoteDescription({
       type: "answer",
-      sdp: await sdpResponse.text(),
+      sdp,
     });
+    if (!isCurrent()) return;
 
     els.realtimeStatus.textContent = "Connected";
     els.connectRealtime.disabled = true;
     els.disconnectRealtime.disabled = false;
   } catch (error) {
+    if (!isCurrent()) return;
     els.realtimeStatus.textContent = "Disconnected";
     els.codexStatus.textContent = "Idle";
     disconnectRealtime();
@@ -210,6 +231,7 @@ async function connectRealtime() {
 }
 
 function disconnectRealtime() {
+  state.realtimeConnection = null;
   finishAudioPlayback("interrupted", state.activeAudioResponseId || state.currentResponseId);
   for (const pending of state.pendingTranscripts.values()) pending.resolve();
   state.pendingTranscripts.clear();
@@ -218,6 +240,11 @@ function disconnectRealtime() {
   state.localStream?.getTracks().forEach((track) => track.stop());
   state.peerConnection?.getSenders().forEach((sender) => sender.track?.stop());
   state.peerConnection?.close();
+  if (state.audioElement) {
+    state.audioElement.pause?.();
+    state.audioElement.srcObject = null;
+    state.audioElement = null;
+  }
   state.dataChannel = null;
   for (const job of state.codexJobs.values()) {
     if (!job.resultDelivered && ["completed", "failed", "interrupted"].includes(job.status)) {

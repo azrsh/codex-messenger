@@ -1,26 +1,35 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-test("HTTP recovery reads the existing turn and steering completes that same request", { timeout: 15000 }, async (t) => {
+for (const mode of ["recovery", "failed-connect"]) {
+test(`HTTP ${mode}: preserve the same Codex thread`, { timeout: 15000 }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "messenger-recovery-"));
   const fake = join(dir, "codex.cjs");
   await writeFile(fake, `#!${process.execPath}
 const readline = require('node:readline');
+const { appendFileSync } = require('node:fs');
 let starts = 0;
+let threads = 0;
 let status = 'inProgress';
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const m = JSON.parse(line);
   if (!m.id) return;
+  appendFileSync(process.env.CODEX_MESSENGER_TEST_LOG, m.method + '\\n');
   let result = {};
-  if (m.method === 'thread/start') result = { thread: { id: 'thread-1' } };
+  if (m.method === 'thread/start') result = { thread: { id: 'thread-' + (++threads) } };
+  if (m.method === 'thread/resume') result = { thread: { id: m.params.threadId } };
   if (m.method === 'turn/start') {
     starts++;
+    if (process.env.CODEX_MESSENGER_TEST_MODE === 'failed-connect') {
+      setTimeout(() => send({ id: m.id, error: { code: -32000, message: 'model requires a newer version of Codex' } }), 50);
+      return;
+    }
     result = { turn: { id: 'turn-1', status } };
   }
   if (m.method === 'thread/read') result = { thread: { id: 'thread-1', turns: [{ id: 'turn-1', status, items: [] }] } };
@@ -36,8 +45,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 });
 `, { mode: 0o755 });
   const server = spawn(process.execPath, ["src/server.js"], {
-    cwd: new URL("..", import.meta.url), detached: true,
-    env: { ...process.env, CODEX_MESSENGER_HOME: dir, CODEX_MESSENGER_PORT: "0", CODEX_MESSENGER_CODEX_BIN: fake },
+    cwd: new URL("../..", import.meta.url), detached: true,
+    env: { ...process.env, CODEX_MESSENGER_HOME: dir, CODEX_MESSENGER_PORT: "0", CODEX_MESSENGER_CODEX_BIN: fake,
+      CODEX_MESSENGER_TEST_MODE: mode, CODEX_MESSENGER_TEST_LOG: join(dir, "rpc.log") },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const exited = once(server, "exit");
@@ -68,6 +78,19 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     return { status: response.status, body: await response.json() };
   };
   const identity = { conversationId: "conversation-1", idempotencyKey: "realtime:request-1" };
+  if (mode === "failed-connect") {
+    const failures = await Promise.all(Array.from({ length: 3 }, () => post("/api/codex/connect", { conversationId: identity.conversationId })));
+    assert.ok(failures.every((failure) => failure.status === 500));
+    const saved = JSON.parse(await readFile(join(dir, "conversations.json"), "utf8"));
+    assert.equal(saved.conversations[0].codexThreadId, "thread-1");
+    assert.equal(saved.conversations[0].codexThreadReadyAt, undefined);
+    assert.equal((await post("/api/codex/connect", { conversationId: identity.conversationId })).status, 500);
+    const methods = (await readFile(join(dir, "rpc.log"), "utf8")).trim().split("\n");
+    assert.equal(methods.filter((method) => method === "thread/start").length, 1);
+    assert.equal(methods.filter((method) => method === "turn/start").length, 2);
+    assert.equal(methods.filter((method) => method === "thread/resume").length, 1);
+    return;
+  }
   const pending = post("/api/codex/message", { ...identity, message: "Work" });
   let running;
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -89,3 +112,4 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   assert.equal(recovered.body.finalText, "starts=1");
   assert.equal((await post("/api/codex/status", { ...identity, idempotencyKey: "unknown" })).status, 404);
 });
+}

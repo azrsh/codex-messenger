@@ -14,6 +14,32 @@ function assistantMessage(threadId, turnId, text) {
   };
 }
 
+test("thread identity is saved before bootstrap and reused after bootstrap failure", async () => {
+  const bridge = new CodexBridge();
+  bridge.ensureStarted = async () => {};
+  let starts = 0;
+  let saved = false;
+  bridge.request = async (method, params) => {
+    if (method === "thread/start") return { thread: { id: `thread-${++starts}` } };
+    assert.equal(method, "thread/resume");
+    return { thread: { id: params.threadId } };
+  };
+  bridge.startTurnAndWait = async () => {
+    assert.equal(saved, true);
+    throw new Error("model requires newer Codex");
+  };
+  const conversation = { conversationId: "test", codexThreadId: null };
+  const onThreadReady = async (thread) => {
+    await Promise.resolve();
+    conversation.codexThreadId = thread.id;
+    saved = true;
+  };
+  for (let i = 0; i < 3; i++) {
+    await assert.rejects(bridge.prepareThreadForDesktop(conversation, { onThreadReady }), /model requires newer Codex/);
+  }
+  assert.equal(starts, 1);
+});
+
 test("steering targets the expected active turn and preserves the instruction", async () => {
   const bridge = new CodexBridge();
   bridge.ensureStarted = async () => {};

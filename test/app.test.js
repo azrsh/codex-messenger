@@ -54,6 +54,92 @@ function jsonResponse(body, ok = true, status = ok ? 200 : 500) {
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+function createConnectionApp() {
+  const calls = [];
+  const peers = [];
+  const streams = [];
+  const app = createApp(async (url) => {
+    calls.push(url);
+    if (url === "/api/codex/connect") return jsonResponse({ conversation: { codexThreadId: "thread-1" } });
+    if (url === "/api/realtime/session") return jsonResponse({ value: "mock" });
+    return { ok: true, text: async () => "mock-sdp" };
+  });
+  app.state.dataChannel = null;
+  app.context.URL = URL;
+  app.context.requestMicrophone = async () => {
+    const track = { stopped: false, stop() { this.stopped = true; } };
+    const stream = { getTracks: () => [track] };
+    streams.push(stream);
+    return stream;
+  };
+  app.context.RTCPeerConnection = class {
+    constructor() { this.closed = false; peers.push(this); }
+    addTrack() {}
+    createDataChannel() { return { readyState: "open", send() {}, close() {} }; }
+    async createOffer() { return { sdp: "mock-offer" }; }
+    async setLocalDescription() {}
+    async setRemoteDescription() {}
+    getSenders() { return []; }
+    close() { this.closed = true; }
+  };
+  return { ...app, calls, peers, streams };
+}
+
+test("repeated connect creates one peer and disconnect closes every owned resource", async () => {
+  const { context, state, peers, calls, streams, elements } = createConnectionApp();
+  const first = context.connectRealtime();
+  assert.equal(elements.get("#connectRealtime").disabled, true);
+  await Promise.all([first, context.connectRealtime()]);
+  await context.connectRealtime();
+  assert.equal(peers.length, 1);
+  assert.equal(calls.filter((path) => path === "/api/codex/connect").length, 1);
+  const audio = state.audioElement;
+  audio.srcObject = streams[0];
+  context.disconnectRealtime();
+  assert.equal(peers.filter((peer) => !peer.closed).length, 0);
+  assert.ok(streams.every((stream) => stream.getTracks()[0].stopped));
+  assert.equal(audio.srcObject, null);
+});
+
+test("cancelled microphone acquisition cannot revive or replace a later connection", async () => {
+  const { context, state, peers } = createConnectionApp();
+  const normalMicrophone = context.requestMicrophone;
+  let resolveMicrophone;
+  context.requestMicrophone = () => new Promise((resolve) => { resolveMicrophone = resolve; });
+  const stale = context.connectRealtime();
+  context.disconnectRealtime();
+  context.requestMicrophone = normalMicrophone;
+  await context.connectRealtime();
+  const current = state.peerConnection;
+  const lateTrack = { stopped: false, stop() { this.stopped = true; } };
+  resolveMicrophone({ getTracks: () => [lateTrack] });
+  await stale;
+  assert.equal(state.peerConnection, current);
+  assert.equal(peers.length, 1);
+  assert.equal(lateTrack.stopped, true);
+  context.disconnectRealtime();
+});
+
+test("failure from a cancelled SDP request does not disconnect the new peer", async () => {
+  const { context, state, peers } = createConnectionApp();
+  const normalFetch = context.fetch;
+  let rejectSdp;
+  context.fetch = (url) => String(url).startsWith("https:")
+    ? new Promise((_resolve, reject) => { rejectSdp = reject; }) : normalFetch(url);
+  const stale = context.connectRealtime();
+  await flush();
+  context.disconnectRealtime();
+  context.fetch = normalFetch;
+  await context.connectRealtime();
+  const current = state.peerConnection;
+  rejectSdp(new Error("old connection failed"));
+  await stale;
+  assert.equal(state.peerConnection, current);
+  assert.equal(current.closed, false);
+  assert.equal(peers[0].closed, true);
+  context.disconnectRealtime();
+});
+
 test("definitively missing recovery releases the active request without replay", async () => {
   const { context, state } = createApp(async () => jsonResponse({ error: "Unknown request" }, false, 404));
   state.codexRunning = true;

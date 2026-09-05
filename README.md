@@ -15,6 +15,21 @@ When voice is connected, Messenger starts a Codex thread and completes a tiny
 initial turn so the displayed `codex://threads/...` link can be opened in Codex
 Desktop immediately.
 
+Only one voice connection can be established at a time. Disconnect also cancels
+an in-progress connection attempt and releases its microphone, peer connection,
+and audio playback. Late completions from cancelled attempts are ignored.
+Concurrent Codex connection requests for the same conversation share preparation.
+The thread ID is saved before the bootstrap turn, so a model error does not
+discard that ID on retry. The ready flag is saved only after bootstrap succeeds.
+
+## Tests
+
+`npm test` runs tests without opening network ports and can run inside the Codex
+sandbox. `npm run test:integration` separately runs the HTTP tests, which start
+a loopback server and require permission to bind a local port. These tests use a
+mock Codex executable; neither command calls the real Codex or Realtime service.
+Run both commands in a port-enabled environment for the full suite.
+
 ## Environment
 
 - `OPENAI_API_KEY`: required for Realtime session creation.
