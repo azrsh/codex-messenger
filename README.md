@@ -8,8 +8,8 @@ Local-first web messenger for talking to Codex with OpenAI Realtime voice input.
 OPENAI_API_KEY=... npm run dev
 ```
 
-`npm run dev` binds to `127.0.0.1:3000` and restarts the server when its imported
-source files change. Override the port with `CODEX_MESSENGER_PORT=3001 npm run dev`.
+`npm run dev` binds to `127.0.0.1:54387` and restarts the server when its imported
+source files change. Override the port with `CODEX_MESSENGER_PORT=54388 npm run dev`.
 Browser refresh and voice reconnection remain manual after a restart.
 `npm start` runs without watching and uses a random port unless one is specified.
 Codex work is sent through `codex app-server`, so created threads appear in Codex
