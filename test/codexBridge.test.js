@@ -14,6 +14,23 @@ function assistantMessage(threadId, turnId, text) {
   };
 }
 
+test("steering targets the expected active turn and preserves the instruction", async () => {
+  const bridge = new CodexBridge();
+  bridge.ensureStarted = async () => {};
+  const calls = [];
+  bridge.request = async (method, params) => {
+    calls.push({ method, params });
+    return { turnId: "turn-1" };
+  };
+  assert.deepEqual(await bridge.steerTurn("thread-1", "turn-1", "Keep the API unchanged."), { turnId: "turn-1" });
+  assert.deepEqual(calls, [{ method: "turn/steer", params: {
+    threadId: "thread-1", expectedTurnId: "turn-1",
+    input: [{ type: "text", text: "Keep the API unchanged." }],
+  } }]);
+  bridge.request = async () => { throw new Error("Active turn mismatch"); };
+  await assert.rejects(bridge.steerTurn("thread-1", "turn-1", "Correction"), /Active turn mismatch/);
+});
+
 test("concurrent turns forward only their own events, once, and clean up listeners", async () => {
   const bridge = new CodexBridge();
   bridge.startOrResumeThread = async (conversation) => ({ id: conversation.codexThreadId });

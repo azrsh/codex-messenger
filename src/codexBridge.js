@@ -351,4 +351,13 @@ export class CodexBridge extends EventEmitter {
     await this.ensureStarted();
     return this.request("turn/interrupt", { threadId });
   }
+
+  async steerTurn(threadId, expectedTurnId, message) {
+    await this.ensureStarted();
+    return this.request("turn/steer", {
+      threadId,
+      expectedTurnId,
+      input: [{ type: "text", text: message }],
+    });
+  }
 }

@@ -36,6 +36,59 @@ Desktop immediately.
 - Realtime WebRTC session creation with the API key kept local.
 - Realtime `start_codex_request` and `poll_codex_request` tool calls for typed
   or spoken Codex requests.
+- `steer_codex_request` for explicit corrections to a running request, using
+  app-server `turn/steer` with an expected turn ID. Polling and completion keep
+  the original request ID. Starting, completed, or rejected turns report that
+  the instruction was not confirmed; they do not start replacement work.
 - Codex app-server JSON-RPC bridge over stdio.
 - Codex thread deeplinks that are prepared for Codex Desktop on voice connect.
 - Server-Sent Events for Codex progress.
+
+Codex completion notifications are temporary internal messages in the Realtime
+conversation. After a matching poll returns a terminal result, the app sends a
+deletion request for that notification only. User messages, tool calls and
+results, and assistant replies remain in the conversation. Unprocessed
+notifications remain until a matching terminal poll result is sent in the same
+Realtime session.
+
+Completion notifications wait while the user is speaking, a Realtime response
+is pending, audio is playing, or a tool call is being handled. They are released
+at the next idle point. If a poll supplies the terminal result first, the queued
+notification is consumed without a second announcement. Unsent notifications
+and unfinished requests survive page reload in the same tab using
+`sessionStorage`. Voice reconnection seeds the new Realtime session with reference
+history and the active request ID. Result delivery is tracked separately from
+sending a notification so an unprocessed completion can be recovered.
+
+Progress polling provides a short description of the current action and bounded
+details from commentary, plans, commands, file changes, and tools. Reasoning
+items are excluded. The voice agent summarizes these observations in the user's
+language without equating an individual action finishing with the whole request
+finishing, or inventing an ETA. Polling remains on demand.
+
+Start and steer attach a reference snapshot of received user and assistant
+transcripts (up to 24 messages and 24,000 text characters) to the current
+instruction. Internal notifications and tool logs are excluded. Older entries
+are omitted as whole messages and the omission count is included; the current
+instruction is not truncated. Historical requests are context, not work to
+repeat, and assistant statements do not grant user authorization.
+
+Audio replies are included as text only after playback completion is reported.
+Interrupted or unconfirmed audio is replaced by a marker; the app does not guess
+which words were heard from a playback timestamp. This cannot prove that the
+user actually heard the audio (for example, with muted speakers).
+
+Dispatch waits up to 1.5 seconds for pending speech transcriptions. If they arrive
+later, transcripts associated with that dispatch are sent once as clarification
+to the same running turn. Completed turns are never restarted for late context.
+Failures to deliver late context are displayed; ambiguous failures are not
+automatically retried. The current tool request must still preserve the user's
+intent and constraints.
+
+Reload recovery reads the original request's server-side status without
+resubmitting it. This requires the same local server process and browser origin;
+request tracking is in server memory. If the server restarted or has no matching
+request, recovery reports that it is unavailable. It does not restart work.
+Closing the tab clears the browser snapshot, while Codex retains its own thread
+history. Browser storage being disabled or full disables reload recovery but
+does not prevent a live session.
