@@ -14,16 +14,10 @@ Browser refresh and voice reconnection remain manual after a restart.
 `npm start` runs without watching and uses a random port unless one is specified.
 Codex work is sent through `codex app-server`, so created threads appear in Codex
 Desktop.
-When voice is connected, Messenger starts a Codex thread and completes a tiny
-initial turn so the displayed `codex://threads/...` link can be opened in Codex
-Desktop immediately.
+When voice is connected, the displayed thread link can be opened in Codex Desktop.
 
 Only one voice connection can be established at a time. Disconnect also cancels
-an in-progress connection attempt and releases its microphone, peer connection,
-and audio playback. Late completions from cancelled attempts are ignored.
-Concurrent Codex connection requests for the same conversation share preparation.
-The thread ID is saved before the bootstrap turn, so a model error does not
-discard that ID on retry. The ready flag is saved only after bootstrap succeeds.
+an in-progress connection attempt.
 
 ## Tests
 
@@ -50,68 +44,23 @@ Run both commands in a port-enabled environment for the full suite.
 
 ## Current MVP
 
-- Local-only HTTP server with per-launch capability token.
-- Realtime WebRTC session creation with the API key kept local.
-- Realtime `start_codex_request` and `poll_codex_request` tool calls for typed
-  or spoken Codex requests.
-- `steer_codex_request` for corrections and contextual follow-ups to a running request, using
-  app-server `turn/steer` with an expected turn ID. Polling and completion keep
-  the original request ID. Starting, completed, or rejected turns report that
-  the instruction was not confirmed; they do not start replacement work.
-- Codex app-server JSON-RPC bridge over stdio.
-- Codex thread deeplinks that are prepared for Codex Desktop on voice connect.
-- Server-Sent Events for Codex progress.
+- Local-only server with the OpenAI API key kept on the server.
+- Typed and spoken Codex requests, with corrections and follow-ups to running work.
+- Progress updates on request and completion notifications that wait for a pause
+  in the conversation.
+- Recent conversation context carried into requests and across voice reconnections.
+- Codex thread links that open in Codex Desktop.
 
 Realtime is instructed to delegate substantive questions and implicit follow-ups
 without requiring the user to mention Codex, while preserving questions as
 questions rather than authorization to edit. Dispatch still depends on the
 model calling a tool; transcripts are not automatically submitted.
 
-Codex completion notifications are temporary internal messages in the Realtime
-conversation. After a matching poll returns a terminal result, the app sends a
-deletion request for that notification only. User messages, tool calls and
-results, and assistant replies remain in the conversation. Unprocessed
-notifications remain until a matching terminal poll result is sent in the same
-Realtime session.
+Conversation context is limited to recent messages; interrupted or unconfirmed
+audio replies are omitted. Failures to deliver follow-ups or delayed speech
+transcriptions are reported without automatically starting replacement work.
 
-Completion notifications wait while the user is speaking, a Realtime response
-is pending, audio is playing, or a tool call is being handled. They are released
-at the next idle point. If a poll supplies the terminal result first, the queued
-notification is consumed without a second announcement. Unsent notifications
-and unfinished requests survive page reload in the same tab using
-`sessionStorage`. Voice reconnection seeds the new Realtime session with reference
-history and the active request ID. Result delivery is tracked separately from
-sending a notification so an unprocessed completion can be recovered.
-
-Progress polling provides a short description of the current action and bounded
-details from commentary, plans, commands, file changes, and tools. Reasoning
-items are excluded. The voice agent summarizes these observations in the user's
-language without equating an individual action finishing with the whole request
-finishing, or inventing an ETA. Polling remains on demand.
-
-Start and steer attach a reference snapshot of received user and assistant
-transcripts (up to 24 messages and 24,000 text characters) to the current
-instruction. Internal notifications and tool logs are excluded. Older entries
-are omitted as whole messages and the omission count is included; the current
-instruction is not truncated. Historical requests are context, not work to
-repeat, and assistant statements do not grant user authorization.
-
-Audio replies are included as text only after playback completion is reported.
-Interrupted or unconfirmed audio is replaced by a marker; the app does not guess
-which words were heard from a playback timestamp. This cannot prove that the
-user actually heard the audio (for example, with muted speakers).
-
-Dispatch waits up to 1.5 seconds for pending speech transcriptions. If they arrive
-later, transcripts associated with that dispatch are sent once as clarification
-to the same running turn. Completed turns are never restarted for late context.
-Failures to deliver late context are displayed; ambiguous failures are not
-automatically retried. The current tool request must still preserve the user's
-intent and constraints.
-
-Reload recovery reads the original request's server-side status without
-resubmitting it. This requires the same local server process and browser origin;
-request tracking is in server memory. If the server restarted or has no matching
-request, recovery reports that it is unavailable. It does not restart work.
-Closing the tab clears the browser snapshot, while Codex retains its own thread
-history. Browser storage being disabled or full disables reload recovery but
-does not prevent a live session.
+Reloading the same tab can recover unfinished requests and pending completion
+notifications without resubmitting work. Recovery requires the same server
+process and browser origin, plus available browser storage. Restarting the server
+or closing the tab prevents this recovery; Codex retains its own thread history.
