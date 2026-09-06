@@ -2,6 +2,9 @@
 
 Local-first web messenger for talking to Codex with OpenAI Realtime voice input.
 
+Use it for voice interaction backed by Codex, even when your Codex setup is not
+connected to ChatGPT.
+
 ## Run
 
 ```bash
